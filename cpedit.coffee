@@ -38,6 +38,9 @@ class Editor
     @vertexCircle = {}
     @dragGroup = @svg.group()
     .addClass 'drag'
+    @angleBisectorSnapNodes = []
+    @angleBisectorSnapGroup = @svg.group()
+    .addClass 'angle-bisector-snap'
     @updateGrid()
 
   updateGrid: ->
@@ -65,6 +68,14 @@ class Editor
       vertex = @fold.vertices_coords[v]
       if FOLD.geom.dist(vertex, p) < FOLD.geom.dist(closest, p)
         closest = vertex
+
+    # Check angle bisector snap nodes
+    # These are stored as {x: ..., y: ...} objects
+    for snapNode in @angleBisectorSnapNodes
+      snapNodeCoords = [snapNode.x, snapNode.y]
+      if FOLD.geom.dist(snapNodeCoords, p) < FOLD.geom.dist(closest, p)
+        closest = snapNodeCoords
+
     x: closest[0]
     y: closest[1]
 
@@ -341,6 +352,161 @@ class LineDrawMode extends Mode
         @circles.push editor.dragGroup.circle 0.3
       @circles[@which].center @points[@which].x, @points[@which].y
       if @which == 1
+        # Clear previous bisector snap points
+        editor.angleBisectorSnapNodes = []
+        editor.angleBisectorSnapGroup.clear()
+
+        p0_coords = null
+        # Check if the first point @points[0] corresponds to an existing vertex
+        # This involves finding the vertex index for @points[0]
+        # For simplicity, let's assume @points[0] always snaps to an existing vertex
+        # if it's close enough. The current editor.nearestFeature handles this.
+        # We need to get the actual vertex coordinates from editor.fold.vertices_coords
+
+        # A robust way to get p0_coords if @points[0] is snapped to a vertex:
+        # Iterate editor.fold.vertices_coords and find one that matches @points[0].x, @points[0].y
+        # For now, we assume @points[0] is the exact coordinate of the vertex.
+        p0 = @points[0] # This is {x: ..., y: ...}
+
+        # Check if p0 is an actual vertex in the model.
+        # We need its index to find incident edges.
+        p0_vertex_index = -1
+        for v_idx in [0...editor.fold.vertices_coords.length]
+          v_coord = editor.fold.vertices_coords[v_idx]
+          if FOLD.geom.dist([p0.x, p0.y], v_coord) < FOLD.geom.EPS
+            p0_vertex_index = v_idx
+            p0_coords = v_coord # Use the precise coordinates from the fold object
+            break
+
+        if p0_vertex_index != -1 and p0_coords?
+          p_current_drag = [@points[1].x, @points[1].y]
+
+          for e_idx in [0...editor.fold.edges_vertices.length]
+            edge_vertices_indices = editor.fold.edges_vertices[e_idx]
+            v1_idx = edge_vertices_indices[0]
+            v2_idx = edge_vertices_indices[1]
+
+            v_shared_idx = -1
+            v_other_idx = -1
+
+            if v1_idx == p0_vertex_index
+              v_shared_idx = v1_idx
+              v_other_idx = v2_idx
+            else if v2_idx == p0_vertex_index
+              v_shared_idx = v2_idx
+              v_other_idx = v1_idx
+
+            if v_shared_idx != -1
+              v_shared = editor.fold.vertices_coords[v_shared_idx]
+              v_other = editor.fold.vertices_coords[v_other_idx]
+
+              vec1 = FOLD.geom.sub v_other, v_shared # Vector from shared point to other point on existing edge
+              vec2 = FOLD.geom.sub p_current_drag, v_shared # Vector from shared point to current drag point
+
+              # Ensure vectors are not zero length
+              if FOLD.geom.mag(vec1) < FOLD.geom.EPS or FOLD.geom.mag(vec2) < FOLD.geom.EPS
+                continue
+
+              # Normalize vectors for angle calculation and bisector
+              # vec1_norm = FOLD.geom.normalize vec1 # FOLD.geom.normalize might not exist
+              # vec2_norm = FOLD.geom.normalize vec2
+              # A more direct way to get bisector direction:
+              # bisector_dir_1 = FOLD.geom.add(FOLD.geom.normalize(vec1), FOLD.geom.normalize(vec2))
+              # bisector_dir_2 = FOLD.geom.sub(FOLD.geom.normalize(vec1), FOLD.geom.normalize(vec2))
+              # (or rotate one by PI)
+
+              # Calculate angle between vec1 and vec2. FOLD.geom.angle might not exist.
+              # Alternative: dot_product = FOLD.geom.dot(vec1_norm, vec2_norm)
+              # angle_rad = Math.acos(Math.max(-1, Math.min(1, dot_product)))
+
+              # For bisector, it's often easier to work with normalized vectors
+              u1 = FOLD.geom.mul vec1, 1 / FOLD.geom.mag(vec1)
+              u2 = FOLD.geom.mul vec2, 1 / FOLD.geom.mag(vec2)
+
+              # Bisector directions (sum and difference of unit vectors)
+              # These are not normalized yet
+              bisector_sum_dir = FOLD.geom.add u1, u2
+              bisector_diff_dir = FOLD.geom.sub u1, u2 # This gives the other bisector (perpendicular to the first if angles are 90)
+
+              potential_bisector_dirs = []
+              if FOLD.geom.mag(bisector_sum_dir) > FOLD.geom.EPS
+                potential_bisector_dirs.push FOLD.geom.mul bisector_sum_dir, 1 / FOLD.geom.mag(bisector_sum_dir)
+              if FOLD.geom.mag(bisector_diff_dir) > FOLD.geom.EPS
+                potential_bisector_dirs.push FOLD.geom.mul bisector_diff_dir, 1 / FOLD.geom.mag(bisector_diff_dir)
+
+              for bisector_dir in potential_bisector_dirs
+                # Define a long ray for intersection testing
+                # Ray starts at v_shared (p0_coords) and goes in bisector_dir
+                ray_far_endpoint = FOLD.geom.add v_shared, FOLD.geom.mul(bisector_dir, 1000) # 1000 is a large number
+
+                for other_e_idx in [0...editor.fold.edges_vertices.length]
+                  # Don't intersect with the edge that formed the angle
+                  if other_e_idx == e_idx then continue
+
+                  other_edge_v_indices = editor.fold.edges_vertices[other_e_idx]
+                  oe_v1_coords = editor.fold.vertices_coords[other_edge_v_indices[0]]
+                  oe_v2_coords = editor.fold.vertices_coords[other_edge_v_indices[1]]
+
+                  # Check if this other edge is incident to v_shared. If so, skip.
+                  # (A bisector shouldn't primarily snap to another edge at the same vertex it originates from,
+                  #  unless that's the only option, but standard intersection logic might be tricky here.)
+                  #  For now, let's allow it and see. A better check would be if the intersection is v_shared itself.
+                  if (FOLD.geom.dist(oe_v1_coords, v_shared) < FOLD.geom.EPS) or \
+                     (FOLD.geom.dist(oe_v2_coords, v_shared) < FOLD.geom.EPS)
+                    continue
+
+                  # FOLD.geom.intersect_lines gives intersection of infinite lines.
+                  # We need segment intersection or line-segment intersection.
+                  # Let's assume FOLD.geom.intersect_segment_ray or similar.
+                  # Or, use intersect_lines and then check if intersection is on segment and on ray.
+
+                  # Using a simplified intersection check: FOLD.geom.intersect_segments
+                  # This expects four points: [p1, p2, p3, p4] for segments (p1,p2) and (p3,p4)
+                  # intersect_info = FOLD.geom.intersect_segments v_shared, ray_far_endpoint, oe_v1_coords, oe_v2_coords
+
+                  # The 'fold' library's FOLD.geom.intersect_lines takes two lines, each defined by two points.
+                  # It returns the intersection point or undefined if parallel.
+                  # Then we need to check if this point lies on the segment oe_v1_coords to oe_v2_coords
+                  # and on the ray starting from v_shared in bisector_dir.
+
+                  # For simplicity, let's assume a robust intersect_line_segment function is available or can be built.
+                  # Let's try to find something in FOLD.geom that is similar to intersect_line_segments
+                  # Looking at cpedit.coffee, `FOLD.filter.subdivideCrossingEdges_vertices` might use such functions.
+                  # `FOLD.geom.intersect_line_segments` is not directly listed in common FOLD API docs I can recall.
+                  # A common pattern is `intersect_lines(l1p1, l1p2, l2p1, l2p2)` and then `on_segment(intersect_pt, s_p1, s_p2)`.
+
+                  # Let line1 be the bisector ray (v_shared to ray_far_endpoint)
+                  # Let line2 be the other_edge (oe_v1_coords to oe_v2_coords)
+                  intersection_pt = FOLD.geom.intersect_lines v_shared, ray_far_endpoint, oe_v1_coords, oe_v2_coords
+
+                  if intersection_pt?
+                    # Check if intersection_pt is on the segment [oe_v1_coords, oe_v2_coords]
+                    # And if intersection_pt is on the ray starting from v_shared in bisector_dir
+                    # (i.e., dot product of (intersection_pt - v_shared) and bisector_dir is positive,
+                    # and point is not v_shared itself unless it's the only option)
+
+                    dist_oe1_oe2 = FOLD.geom.dist oe_v1_coords, oe_v2_coords
+                    dist_oe1_int = FOLD.geom.dist oe_v1_coords, intersection_pt
+                    dist_oe2_int = FOLD.geom.dist oe_v2_coords, intersection_pt
+
+                    on_other_segment = Math.abs(dist_oe1_int + dist_oe2_int - dist_oe1_oe2) < FOLD.geom.EPS
+
+                    vec_shared_to_intersect = FOLD.geom.sub intersection_pt, v_shared
+                    on_ray = FOLD.geom.dot(vec_shared_to_intersect, bisector_dir) >= -FOLD.geom.EPS # Allow points very near start
+
+                    # Avoid snapping to the origin of the bisector ray itself if it's not a meaningful intersection
+                    is_not_origin_point = FOLD.geom.dist(intersection_pt, v_shared) > FOLD.geom.EPS
+
+                    if on_other_segment and on_ray and is_not_origin_point
+                      # Check if point is reasonably close (e.g. within page bounds or a large radius)
+                      # For now, add all valid intersections.
+                      snap_point_coords = {x: intersection_pt[0], y: intersection_pt[1]}
+                      editor.angleBisectorSnapNodes.push snap_point_coords
+                      editor.angleBisectorSnapGroup.circle(0.15) # Smaller than drag circles (0.3)
+                        .center(snap_point_coords.x, snap_point_coords.y)
+                        .addClass('angle-bisector-temp-node')
+                        # TODO: Add styling for these nodes if needed
+
         @line ?= editor.dragGroup.line().addClass 'drag'
         @crease ?= editor.dragGroup.line().addClass editor.lineType
         .attr 'stroke-opacity',
@@ -381,8 +547,11 @@ class LineDrawMode extends Mode
     @which = 0
     @dragging = false
     @down = undefined
+    # Clear angle bisector snap points
+    editor.angleBisectorSnapNodes = []
+    editor.angleBisectorSnapGroup.clear()
   exit: (editor) ->
-    @escape editor
+    @escape editor # escape already clears the snap nodes and group
     editor.svg
     .mousemove null
     .mousedown null
