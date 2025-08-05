@@ -322,6 +322,81 @@ class Editor
     a.href = ''
     URL.revokeObjectURL url
 
+  loadFromSVG: (svgString) ->
+    parser = new DOMParser()
+    svgDoc = parser.parseFromString(svgString, "image/svg+xml")
+    
+    svgElement = svgDoc.getElementsByTagName('svg')[0]
+    if svgElement
+      viewBox = svgElement.getAttribute('viewBox')
+      if viewBox
+        [x, y, width, height] = viewBox.split(' ').map(parseFloat)
+        @fold["cpedit:page"] =
+          xMin: x + margin
+          yMin: y + margin
+          xMax: x + width - margin
+          yMax: y + height - margin
+
+    lines = svgDoc.getElementsByTagName('line')
+    
+    vertices = []
+    edges = []
+    
+    findOrAddVertex = (x, y) ->
+      for v, i in vertices
+        if v[0] == x and v[1] == y
+          return i
+      vertices.push([x, y])
+      vertices.length - 1
+
+    for line in lines
+      x1 = parseFloat(line.getAttribute('x1'))
+      y1 = parseFloat(line.getAttribute('y1'))
+      x2 = parseFloat(line.getAttribute('x2'))
+      y2 = parseFloat(line.getAttribute('y2'))
+      
+      v1 = findOrAddVertex(x1, y1)
+      v2 = findOrAddVertex(x2, y2)
+      
+      className = line.getAttribute('class') or ''
+      assignment = 'U' # Default to Unfolded
+      if className.includes('M')
+        assignment = 'M'
+      else if className.includes('V')
+        assignment = 'V'
+      else if className.includes('B')
+        assignment = 'B'
+      else if className.includes('C')
+        assignment = 'C'
+
+      foldAngle = 0
+      opacityAttr = line.getAttribute('stroke-opacity')
+      if opacityAttr
+        opacity = parseFloat(opacityAttr)
+        absAngle = opacity * 180
+        if assignment == 'M'
+          foldAngle = -absAngle
+        else if assignment == 'V'
+          foldAngle = absAngle
+      else # if no opacity, use default full angle
+        if assignment == 'M'
+          foldAngle = -180
+        else if assignment == 'V'
+          foldAngle = 180
+      
+      edges.push
+        vertices: [v1, v2]
+        assignment: assignment
+        foldAngle: foldAngle
+
+    @fold.vertices_coords = vertices
+    @fold.edges_vertices = (e.vertices for e in edges)
+    @fold.edges_assignment = (e.assignment for e in edges)
+    @fold.edges_foldAngle = (e.foldAngle for e in edges)
+    
+    @loadFold(@fold)
+
+
 class Mode
 
 class LineDrawMode extends Mode
@@ -410,7 +485,7 @@ class LineDrawMode extends Mode
     for i in [0...end_points.length] 
       next_i = FOLD.geom.next i, end_points.length 
       A = end_points[i]
-      B = end_points[next_i]
+      B = end_points[next_i] 
       unit_A = FOLD.geom.unit(FOLD.geom.sub(A, startPoint))
       unit_B = FOLD.geom.unit(FOLD.geom.sub(B, startPoint))
       vec = FOLD.geom.plus(unit_A, unit_B)
@@ -640,6 +715,17 @@ window?.onload = ->
     e.preventDefault()
     e.stopPropagation()
     editor.downloadSVG()
+  document.getElementById('loadSVG').addEventListener 'click', (e) ->
+    e.stopPropagation()
+    document.getElementById('fileSVG').click()
+  document.getElementById('fileSVG').addEventListener 'input', (e) ->
+    e.stopPropagation()
+    return unless e.target.files.length
+    file = e.target.files[0]
+    reader = new FileReader
+    reader.onload = ->
+      editor.loadFromSVG reader.result
+    reader.readAsText file
   for [size, dim] in [['width', 'x'], ['height', 'y']]
     for [delta, op] in [[-1, 'Dec'], [+1, 'Inc']]
       do (size, dim, delta, op) ->
@@ -727,13 +813,12 @@ class VSVG
     for [key, value] from @attrs
       s += " #{key}=\"#{value}\""
     if @innerHTML
-      s + ">\n" + @innerHTML + "\n</#{@tag}>"
+      s + "\n" + @innerHTML + "\n</#{@tag}>"
     else if @children.length
-      s + ">\n" + (
+      s + "\n" + (
         for child in @children when not child.removed
           child.svg()
-      ).join("\n") +
-      "\n</#{@tag}>"
+      ).join("\n") + "\n</#{@tag}>"
     else
       s + "/>"
   remove: ->
@@ -802,7 +887,7 @@ class VSVG
   find: (pattern) ->
     classes =
       for part in pattern.split /\s*,\s*/
-        match = part.match /^\.([^.]+)$/
+        match = part.match /^\.([^.]+$)/ 
         throw new Error "Bad select pattern '#{part}'" unless match?
         match[1]
     results = []
@@ -858,7 +943,7 @@ cli = (args = process.argv[2..]) ->
       when '-n', '--nice'
         options.nice = true
       else
-        if arg.startsWith '-'
+        if arg.startsWith '-' 
           console.log "Unknown option: #{arg}"
           continue
         cpFiles.push arg
