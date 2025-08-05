@@ -52,21 +52,28 @@ class Editor
       @gridGroup.line page.xMin, y, page.xMax, y
     @svg.viewbox page.xMin - margin, page.yMin - margin, page.xMax - page.xMin + 2*margin, page.yMax - page.yMin + 2*margin
 
-  nearestFeature: (pt) ->
+  nearestFeature: (pt, fold) ->
     p = [pt.x, pt.y]
     page = @fold["cpedit:page"]
-    closest =
+    closest = [null, [Infinity, Infinity], [Infinity, Infinity]]
+    closest[0] =
       [
         Math.max page.xMin, Math.min page.xMax, Math.round pt.x
         Math.max page.yMin, Math.min page.yMax, Math.round pt.y
       ]
-    v = FOLD.geom.closestIndex p, @fold.vertices_coords
-    if v?
-      vertex = @fold.vertices_coords[v]
-      if FOLD.geom.dist(vertex, p) < FOLD.geom.dist(closest, p)
-        closest = vertex
-    x: closest[0]
-    y: closest[1]
+    v_curr = FOLD.geom.closestIndex p, @fold.vertices_coords
+    if v_curr?
+      closest[1] = @fold.vertices_coords[v_curr]
+    if fold?
+      v_temp = FOLD.geom.closestIndex p, fold.vertices_coords
+      if v_temp?
+        closest[2] = fold.vertices_coords[v_temp]
+
+    v_final = FOLD.geom.closestIndex p, closest
+    closest_final = closest[v_final]
+    x: closest_final[0]
+    y: closest_final[1]
+    type: v_final
 
   setTitle: (title) ->
     @fold['file_title'] = title
@@ -325,8 +332,9 @@ class LineDrawMode extends Mode
     @circles = []
     @crease = @line = null
     @dragging = false
+    @tempFold = null
     svg.mousemove move = (e) =>
-      point = editor.nearestFeature svg.point e.clientX, e.clientY
+      point = editor.nearestFeature svg.point(e.clientX, e.clientY), @tempFold
       ## Wait for distance threshold in drag before triggering drag
       if e.buttons
         if @down?
@@ -341,8 +349,19 @@ class LineDrawMode extends Mode
         @circles.push editor.dragGroup.circle 0.3
       @circles[@which].center @points[@which].x, @points[@which].y
       if @which == 1
-        @line ?= editor.dragGroup.line().addClass 'drag'
+        @tempFold ?= @addBisectors editor.fold, @points[0]
+        @line ?= editor.dragGroup.line().addClass 'drag' 
+        if point.type == 2
+          unless @line.hasClass('bisector')
+            @line.addClass('bisector')
+            @circles.map (c) -> c.addClass('bisector')
+        else
+          if @line.hasClass('bisector')
+            @line.removeClass('bisector')
+            @circles.map (c) -> c.removeClass('bisector')
+
         @crease ?= editor.dragGroup.line().addClass editor.lineType
+
         .attr 'stroke-opacity',
           foldAngleToOpacity editor.getFoldAngle(), editor.lineType
         @line.plot @points[0].x, @points[0].y, @points[1].x, @points[1].y
@@ -373,6 +392,34 @@ class LineDrawMode extends Mode
     svg.mouseleave (e) =>
       if @circles.length == @which + 1
         @circles.pop().remove()
+  addBisectors: (fold, startPoint) ->
+    page = fold["cpedit:page"]
+    max_magnitude = FOLD.geom.dist([page.xMin,page.yMin], [page.xMax, page.yMax])
+
+    startPoint = [startPoint.x, startPoint.y]
+    tempFold = FOLD.convert.deepCopy fold
+    ## tempFold = fold
+    start_idx = FOLD.geom.closestIndex startPoint, fold.vertices_coords
+    end_idxs = FOLD.filter.edges_vertices_to_vertices_vertices(fold)[start_idx]
+    end_idxs ?= []
+    unless end_idxs.length >= 2
+      return tempFold
+
+    end_points = (fold.vertices_coords[i] for i in end_idxs)
+    end_points = FOLD.geom.sortByAngle end_points, startPoint
+    for i in [0...end_points.length] 
+      next_i = FOLD.geom.next i, end_points.length 
+      A = end_points[i]
+      B = end_points[next_i]
+      unit_A = FOLD.geom.unit(FOLD.geom.sub(A, startPoint))
+      unit_B = FOLD.geom.unit(FOLD.geom.sub(B, startPoint))
+      vec = FOLD.geom.plus(unit_A, unit_B)
+      vec = FOLD.geom.mul(vec, max_magnitude)
+      endPoint = FOLD.geom.plus(startPoint, vec)
+      FOLD.filter.addEdgeAndSubdivide(tempFold, startPoint, endPoint, FOLD.geom.EPS)
+    tempFold
+
+
   escape: (editor) ->
     @circles.pop().remove() while @circles.length
     @crease?.remove()
@@ -381,6 +428,7 @@ class LineDrawMode extends Mode
     @which = 0
     @dragging = false
     @down = undefined
+    @tempFold = null
   exit: (editor) ->
     @escape editor
     editor.svg
