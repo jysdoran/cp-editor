@@ -173,11 +173,32 @@ class Editor
   shiftR: -> @translate +1, 0
   shiftU: -> @translate 0, -1
   shiftD: -> @translate 0, +1
+  zoom: (scale) ->
+    @saveForUndo()
+    matrix = [[scale, 0], [0, scale]]
+    FOLD.filter.transform @fold, matrix
+    page = @fold["cpedit:page"]
+    for key in ['xMin', 'xMax', 'yMin', 'yMax']
+      page[key] *= scale
+    @loadFold @fold
+  zoomIn: -> @zoom 0.5
+  zoomOut: -> @zoom 2
+  normaliseGrid: ->
+    page = @fold["cpedit:page"]
+    
+    xShift = Math.min(@fold["cpedit:page"].xMin, 0) * -1
+    yShift = Math.min(@fold["cpedit:page"].yMin, 0) * -1
+    
+    FOLD.filter.transform @fold, FOLD.geom.matrixTranslate [xShift,yShift]
+    @fold["cpedit:page"].xMin += xShift
+    @fold["cpedit:page"].xMax += xShift
+    @fold["cpedit:page"].yMin += yShift
+    @fold["cpedit:page"].yMax += yShift
+
 
   loadFold: (@fold) ->
     @fold.version = 1.2
     @mode?.exit @
-    @drawVertices()
     @fold.edges_foldAngle ?=
       for assignment in @fold.edges_assignment
         switch assignment
@@ -187,7 +208,6 @@ class Editor
             -180   # "negative for mountain folds, and"
           else
             0      # "zero for flat, unassigned, and border folds"
-    @drawEdges()
     @fold["cpedit:page"] ?=
       if @fold.vertices_coords?.length
         xMin: Math.min ...(v[0] for v in @fold.vertices_coords)
@@ -196,6 +216,9 @@ class Editor
         yMax: Math.max ...(v[1] for v in @fold.vertices_coords)
       else
         defaultPage()
+    @normaliseGrid()
+    @drawVertices()
+    @drawEdges()
     @updateGrid()
     document?.getElementById('title').value = @fold.file_title ? ''
     @mode?.enter @
@@ -689,7 +712,7 @@ window?.onload = ->
         editor.undo()
       when 'y', 'Z'
         editor.redo()
-  for id in ['cleanup', 'undo', 'redo', 'reflectX', 'reflectY', 'rotateCCW', 'rotateCW', 'shiftL', 'shiftD', 'shiftU', 'shiftR']
+  for id in ['cleanup', 'undo', 'redo', 'reflectX', 'reflectY', 'rotateCCW', 'rotateCW', 'shiftL', 'shiftD', 'shiftU', 'shiftR', 'zoomIn', 'zoomOut']
     do (id) ->
       document.getElementById(id).addEventListener 'click', (e) ->
         e.stopPropagation()
